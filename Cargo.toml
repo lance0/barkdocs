@@ -1,0 +1,26 @@
+[package]
+name = "barkdocs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "A keyboard-driven TUI markdown viewer, companion to barklog"
+repository = "https://github.com/lance0/barkdocs"
+keywords = ["tui", "markdown", "terminal", "viewer", "cli"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+anyhow = "1"
+regex = "1"
+pulldown-cmark = "0.12"
+tui-textarea = "0.7"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+dirs = "6"
+arboard = "3"
+
+[profile.release]
+lto = true
+strip = true
