@@ -70,6 +70,7 @@ barkdocs
 | Key | Action |
 |-----|--------|
 | `b` | Toggle outline panel |
+| `</>` or `[/]` | Resize outline panel |
 | `w` | Toggle line wrap |
 | `#` | Toggle line numbers |
 | `Ctrl+s` | Toggle syntax highlighting |
@@ -133,7 +134,8 @@ Config file: `~/.config/barkdocs/config.toml`
 ```toml
 theme = "dracula"
 line_wrap = true
-show_outline = false
+show_outline = true
+outline_width = 24
 show_line_numbers = false
 syntax_highlighting = true
 auto_reload = true
@@ -170,6 +172,10 @@ Change theme with `S` (Settings) or set in config file.
 |----------|-------------|
 | `BARKDOCS_THEME` | Override theme |
 | `BARKDOCS_LINE_WRAP` | Override line wrap (1/0) |
+| `BARKDOCS_OUTLINE` | Override outline panel (1/0) |
+| `BARKDOCS_LINE_NUMBERS` | Override line numbers (1/0) |
+| `BARKDOCS_SYNTAX_HIGHLIGHTING` | Override syntax highlighting (1/0) |
+| `BARKDOCS_AUTO_RELOAD` | Override auto-reload (1/0) |
 
 ## License
 

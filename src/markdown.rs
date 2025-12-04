@@ -90,6 +90,8 @@ pub struct Heading {
     pub level: u8,
     pub text: String,
     pub line_number: usize,
+    /// Actual line in rendered output (set during rendering)
+    pub rendered_line: usize,
 }
 
 /// A link found in the document
@@ -252,6 +254,7 @@ impl Document {
                                 level,
                                 text: text.clone(),
                                 line_number: current_line,
+                                rendered_line: 0, // Set during rendering
                             });
 
                             blocks.push(Block::Heading {
@@ -297,13 +300,14 @@ impl Document {
                             start: list_start,
                             items: std::mem::take(&mut list_items),
                         });
-                        current_line += list_items.len();
+                        current_line += 1; // Blank line after list (items counted individually)
                     }
                     TagEnd::Item => {
                         in_list_item = false;
                         list_items.push(ListItem {
                             spans: std::mem::take(&mut current_spans),
                         });
+                        current_line += 1; // Each list item = one rendered line
                     }
                     TagEnd::Emphasis => {
                         current_style.italic = false;
@@ -369,21 +373,28 @@ impl Document {
 
     /// Render document to displayable lines (without syntax highlighting)
     #[allow(dead_code)]
-    pub fn render(&self, theme: &Theme) -> Vec<Line<'static>> {
+    pub fn render(&mut self, theme: &Theme) -> Vec<Line<'static>> {
         self.render_with_highlighting(theme, None)
     }
 
     /// Render document with optional syntax highlighting for code blocks
     pub fn render_with_highlighting(
-        &self,
+        &mut self,
         theme: &Theme,
         highlighter: Option<&SyntaxHighlighter>,
     ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
+        let mut heading_index = 0;
 
         for block in &self.blocks {
             match block {
                 Block::Heading { level, spans } => {
+                    // Update the heading's rendered line position
+                    if heading_index < self.headings.len() {
+                        self.headings[heading_index].rendered_line = lines.len();
+                        heading_index += 1;
+                    }
+
                     let color = match level {
                         1 => theme.heading_1,
                         2 => theme.heading_2,
@@ -529,7 +540,7 @@ impl Document {
 
     /// Get total line count (estimated)
     #[allow(dead_code)]
-    pub fn line_count(&self) -> usize {
+    pub fn line_count(&mut self) -> usize {
         self.render(&Theme::default()).len()
     }
 

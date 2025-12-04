@@ -2,6 +2,25 @@
 
 All notable changes to barkdocs will be documented in this file.
 
+## [1.1.4] - 2025-12-04
+
+### Added
+- Resizable outline panel (`<`/`>` or `[`/`]` keys, or `h`/`l` when focused)
+- Syntax highlighting and auto-reload settings now persist to config
+- Environment variable overrides: `BARKDOCS_SYNTAX_HIGHLIGHTING`, `BARKDOCS_AUTO_RELOAD`
+
+### Fixed
+- **Outline navigation** - Jumping to headings now goes to correct line position
+- **Buffer URL state** - Switching buffers properly preserves/restores URL vs file state
+- **Auto-reload per-buffer** - File modification times tracked per-buffer, not globally
+- **List item links** - Links in list items now work correctly (not just first item)
+- **Non-blocking URL fetch** - URL loading no longer freezes the UI (async with thread)
+- **Settings save** - Outline width now saved correctly (was hardcoded to 24)
+- Long heading text in outline panel now truncates with ellipsis
+
+### Changed
+- URL fetching moved to background thread for responsive UI during network requests
+
 ## [1.1.3] - 2025-12-04
 
 ### Added

@@ -1,5 +1,6 @@
 use reqwest::blocking::Client;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 /// Cached content from a URL fetch
@@ -42,9 +43,10 @@ impl std::fmt::Display for FetchError {
 }
 
 /// GitHub URL fetcher with session cache
+#[derive(Clone)]
 pub struct GitHubFetcher {
     client: Client,
-    cache: HashMap<String, CachedContent>,
+    cache: Arc<Mutex<HashMap<String, CachedContent>>>,
 }
 
 impl Default for GitHubFetcher {
@@ -63,7 +65,7 @@ impl GitHubFetcher {
 
         Self {
             client,
-            cache: HashMap::new(),
+            cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -157,10 +159,13 @@ impl GitHubFetcher {
     }
 
     /// Fetch content from URL (checks cache first)
-    pub fn fetch(&mut self, url: &str) -> Result<String, FetchError> {
+    pub fn fetch(&self, url: &str) -> Result<String, FetchError> {
         // Check cache first
-        if let Some(cached) = self.cache.get(url) {
-            return Ok(cached.content.clone());
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some(cached) = cache.get(url) {
+                return Ok(cached.content.clone());
+            }
         }
 
         // Resolve the URL
@@ -180,13 +185,16 @@ impl GitHubFetcher {
         };
 
         // Cache the result
-        self.cache.insert(
-            url.to_string(),
-            CachedContent {
-                content: content.clone(),
-                fetch_time: SystemTime::now(),
-            },
-        );
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert(
+                url.to_string(),
+                CachedContent {
+                    content: content.clone(),
+                    fetch_time: SystemTime::now(),
+                },
+            );
+        }
 
         Ok(content)
     }
@@ -217,7 +225,7 @@ impl GitHubFetcher {
     /// Fetch README from repository root
     /// Tries common branch names and README filename variants
     /// Also handles symlinks (GitHub returns symlink target as content)
-    pub fn fetch_repo_readme(&mut self, user: &str, repo: &str) -> Result<String, FetchError> {
+    pub fn fetch_repo_readme(&self, user: &str, repo: &str) -> Result<String, FetchError> {
         let branches = [
             "HEAD", "main", "master", "canary", "develop", "dev", "trunk",
         ];
@@ -262,14 +270,14 @@ impl GitHubFetcher {
 
     /// Clear the cache
     #[allow(dead_code)]
-    pub fn clear_cache(&mut self) {
-        self.cache.clear();
+    pub fn clear_cache(&self) {
+        self.cache.lock().unwrap().clear();
     }
 
     /// Get cache size
     #[allow(dead_code)]
     pub fn cache_size(&self) -> usize {
-        self.cache.len()
+        self.cache.lock().unwrap().len()
     }
 }
 
@@ -486,12 +494,12 @@ mod tests {
 
     #[test]
     fn test_cache_operations() {
-        let mut fetcher = GitHubFetcher::new();
+        let fetcher = GitHubFetcher::new();
 
         assert_eq!(fetcher.cache_size(), 0);
 
         // Manually insert into cache to test
-        fetcher.cache.insert(
+        fetcher.cache.lock().unwrap().insert(
             "test_url".to_string(),
             CachedContent {
                 content: "cached content".to_string(),

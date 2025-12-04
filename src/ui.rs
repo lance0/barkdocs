@@ -9,8 +9,6 @@ use ratatui::widgets::{
     ScrollbarState, Wrap,
 };
 
-const OUTLINE_WIDTH: u16 = 24;
-
 /// Main draw function
 pub fn draw(frame: &mut Frame, state: &mut AppState) {
     let area = frame.area();
@@ -19,7 +17,7 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
     let main_chunks = if state.show_outline {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(OUTLINE_WIDTH), Constraint::Min(20)])
+            .constraints([Constraint::Length(state.outline_width), Constraint::Min(20)])
             .split(area)
     } else {
         Layout::default()
@@ -137,6 +135,9 @@ fn draw_outline(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(block, area);
 
     if let Some(doc) = &state.document {
+        // Calculate available width for text (panel width - borders - marker)
+        let available_width = inner.width.saturating_sub(2) as usize; // 2 for marker "> "
+
         let items: Vec<ListItem> = doc
             .headings
             .iter()
@@ -149,6 +150,18 @@ fn draw_outline(frame: &mut Frame, state: &AppState, area: Rect) {
                     "  "
                 };
 
+                // Calculate remaining width after indent
+                let text_width = available_width.saturating_sub(indent.len());
+
+                // Truncate with ellipsis if needed
+                let display_text = if heading.text.len() > text_width && text_width > 3 {
+                    format!("{}...", &heading.text[..text_width.saturating_sub(3)])
+                } else if heading.text.len() > text_width {
+                    heading.text[..text_width].to_string()
+                } else {
+                    heading.text.clone()
+                };
+
                 let style = if i == state.outline_selected {
                     Style::default()
                         .fg(theme.outline_selected)
@@ -157,7 +170,7 @@ fn draw_outline(frame: &mut Frame, state: &AppState, area: Rect) {
                     Style::default().fg(theme.outline_heading)
                 };
 
-                ListItem::new(format!("{}{}{}", marker, indent, heading.text)).style(style)
+                ListItem::new(format!("{}{}{}", marker, indent, display_text)).style(style)
             })
             .collect();
 
@@ -580,6 +593,7 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from("  b              Toggle outline"),
+        Line::from("  </>  [/]       Resize outline panel"),
         Line::from("  w/#            Line wrap / numbers"),
         Line::from("  Ctrl+s/R       Syntax hl / auto-reload"),
         Line::from("  Tab            Switch panel focus"),

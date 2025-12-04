@@ -51,9 +51,8 @@ fn main() -> Result<()> {
 
         // Check if it's a URL
         if arg.starts_with("http://") || arg.starts_with("https://") {
-            if let Err(e) = state.load_url(arg) {
-                state.status_message = Some(format!("Error loading URL: {}", e));
-            }
+            // Use non-blocking fetch for startup URL
+            state.start_url_fetch(arg);
         } else {
             // Local file path
             let path = PathBuf::from(arg);
@@ -137,6 +136,9 @@ fn run_event_loop(
 
         // Check for file changes (live reload)
         state.check_file_changed();
+
+        // Check for completed URL fetches
+        state.check_fetch_complete();
 
         if state.should_quit {
             break;

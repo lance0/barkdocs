@@ -85,15 +85,30 @@ fn handle_normal_mode(state: &mut AppState, key: KeyEvent, page_size: usize) {
             FocusedPanel::Outline => state.outline_up(),
         },
 
-        // Horizontal navigation (content only, when wrap off)
+        // Horizontal navigation (content only, when wrap off) or outline resize
         KeyCode::Char('h') | KeyCode::Left => {
             if state.focused_panel == FocusedPanel::Content {
                 state.scroll_left();
+            } else if state.focused_panel == FocusedPanel::Outline {
+                state.outline_width = state.outline_width.saturating_sub(2).max(16);
             }
         }
         KeyCode::Char('l') | KeyCode::Right => {
             if state.focused_panel == FocusedPanel::Content {
                 state.scroll_right();
+            } else if state.focused_panel == FocusedPanel::Outline {
+                state.outline_width = (state.outline_width + 2).min(60);
+            }
+        }
+        // Outline resize (alternative keys)
+        KeyCode::Char('<') | KeyCode::Char('[') => {
+            if state.show_outline {
+                state.outline_width = state.outline_width.saturating_sub(4).max(16);
+            }
+        }
+        KeyCode::Char('>') | KeyCode::Char(']') => {
+            if state.show_outline {
+                state.outline_width = (state.outline_width + 4).min(60);
             }
         }
 

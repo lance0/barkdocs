@@ -16,6 +16,10 @@ pub struct Config {
     pub outline_width: u16,
     /// Whether to show line numbers
     pub show_line_numbers: bool,
+    /// Whether to enable syntax highlighting
+    pub syntax_highlighting: bool,
+    /// Whether to enable auto-reload on file changes
+    pub auto_reload: bool,
 }
 
 impl Default for Config {
@@ -26,6 +30,8 @@ impl Default for Config {
             show_outline: true,
             outline_width: 24,
             show_line_numbers: false,
+            syntax_highlighting: true,
+            auto_reload: true,
         }
     }
 }
@@ -71,6 +77,15 @@ impl Config {
         if let Ok(line_numbers) = std::env::var("BARKDOCS_LINE_NUMBERS") {
             self.show_line_numbers =
                 matches!(line_numbers.to_lowercase().as_str(), "1" | "true" | "yes");
+        }
+
+        if let Ok(syntax) = std::env::var("BARKDOCS_SYNTAX_HIGHLIGHTING") {
+            self.syntax_highlighting =
+                matches!(syntax.to_lowercase().as_str(), "1" | "true" | "yes");
+        }
+
+        if let Ok(reload) = std::env::var("BARKDOCS_AUTO_RELOAD") {
+            self.auto_reload = matches!(reload.to_lowercase().as_str(), "1" | "true" | "yes");
         }
     }
 

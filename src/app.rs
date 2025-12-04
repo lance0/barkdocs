@@ -5,8 +5,12 @@ use crate::storage::{Bookmarks, History};
 use crate::theme::Theme;
 use ratatui::layout::Rect;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 use tui_textarea::TextArea;
+
+/// Result type for async URL fetch: Ok((content, url)) or Err(error_message)
+pub type FetchResult = Result<(String, String), String>;
 
 /// Input mode for the application
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -88,10 +92,12 @@ impl PaneState {
 pub struct DocumentBuffer {
     pub document: Document,
     pub file_path: PathBuf,
+    pub url: Option<String>,
     pub rendered_lines: Vec<ratatui::text::Line<'static>>,
     pub scroll: usize,
     pub horizontal_scroll: usize,
     pub outline_selected: usize,
+    pub modified_time: Option<SystemTime>,
 }
 
 /// Main application state
@@ -132,6 +138,7 @@ pub struct AppState {
 
     // Outline state
     pub outline_selected: usize,
+    pub outline_width: u16,
 
     // Settings overlay state
     pub settings_selected: usize,
@@ -149,6 +156,7 @@ pub struct AppState {
     pub github_fetcher: GitHubFetcher,
     pub current_url: Option<String>,
     pub is_loading: bool,
+    pub fetch_receiver: Option<Receiver<FetchResult>>,
 
     // History & Bookmarks
     pub history: History,
@@ -203,22 +211,24 @@ impl AppState {
             line_wrap: config.line_wrap,
             show_line_numbers: config.show_line_numbers,
             theme: config.get_theme(),
-            syntax_highlighting: true,
+            syntax_highlighting: config.syntax_highlighting,
             highlighter: SyntaxHighlighter::default(),
 
             outline_selected: 0,
+            outline_width: config.outline_width,
             settings_selected: 0,
 
             show_file_picker: false,
             file_picker_files: Vec::new(),
             file_picker_selected: 0,
 
-            auto_reload: true,
+            auto_reload: config.auto_reload,
             file_modified_time: None,
 
             github_fetcher: GitHubFetcher::new(),
             current_url: None,
             is_loading: false,
+            fetch_receiver: None,
 
             history: History::load(),
             bookmarks: Bookmarks::load(),
@@ -259,7 +269,7 @@ impl AppState {
         }
 
         let content = std::fs::read_to_string(path)?;
-        let document = Document::parse(&content);
+        let mut document = Document::parse(&content);
 
         // Pre-render lines with optional syntax highlighting
         let highlighter = if self.syntax_highlighting {
@@ -328,7 +338,7 @@ impl AppState {
 
                 // Read and re-parse the file
                 if let Ok(content) = std::fs::read_to_string(&path_clone) {
-                    let document = Document::parse(&content);
+                    let mut document = Document::parse(&content);
 
                     // Re-render with current settings
                     let highlighter = if self.syntax_highlighting {
@@ -361,7 +371,7 @@ impl AppState {
 
     /// Re-render document (e.g., after theme change)
     pub fn rerender(&mut self) {
-        if let Some(doc) = &self.document {
+        if let Some(doc) = &mut self.document {
             let highlighter = if self.syntax_highlighting {
                 Some(&self.highlighter)
             } else {
@@ -478,7 +488,7 @@ impl AppState {
     pub fn jump_to_heading(&mut self) {
         if let Some(doc) = &self.document {
             if let Some(heading) = doc.headings.get(self.outline_selected) {
-                self.go_to_line(heading.line_number);
+                self.go_to_line(heading.rendered_line);
                 // Switch focus back to content
                 self.focused_panel = FocusedPanel::Content;
             }
@@ -702,8 +712,10 @@ impl AppState {
             theme: self.theme.name.to_string(),
             line_wrap: self.line_wrap,
             show_outline: self.show_outline,
-            outline_width: 24, // default
+            outline_width: self.outline_width,
             show_line_numbers: self.show_line_numbers,
+            syntax_highlighting: self.syntax_highlighting,
+            auto_reload: self.auto_reload,
         };
 
         match config.save() {
@@ -853,10 +865,8 @@ impl AppState {
                 || url.contains("raw.githubusercontent.com");
 
             if can_fetch {
-                // Load the URL directly
-                if let Err(e) = self.load_url(url) {
-                    self.status_message = Some(format!("Error: {}", e));
-                }
+                // Load the URL (non-blocking)
+                self.start_url_fetch(url);
             } else {
                 // External URL - copy to clipboard
                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
@@ -911,14 +921,19 @@ impl AppState {
         let buffer = DocumentBuffer {
             document: doc.clone(),
             file_path: path.clone(),
+            url: self.current_url.clone(),
             rendered_lines: self.rendered_lines.clone(),
             scroll: pane.scroll,
             horizontal_scroll: pane.horizontal_scroll,
             outline_selected: self.outline_selected,
+            modified_time: self.file_modified_time,
         };
 
         // Check if buffer already exists for this file
-        if let Some(idx) = self.buffers.iter().position(|b| b.file_path == *path) {
+        // Skip URL buffers when searching by path to avoid false matches
+        if let Some(idx) = self.buffers.iter().position(|b| {
+            b.url.is_none() && b.file_path == *path
+        }) {
             self.buffers[idx] = buffer;
             self.active_buffer = idx;
         } else {
@@ -940,16 +955,21 @@ impl AppState {
         let buffer = &self.buffers[index];
         let document = buffer.document.clone();
         let file_path = buffer.file_path.clone();
+        let url = buffer.url.clone();
         let rendered_lines = buffer.rendered_lines.clone();
         let outline_selected = buffer.outline_selected;
         let scroll = buffer.scroll;
         let horizontal_scroll = buffer.horizontal_scroll;
+        let modified_time = buffer.modified_time;
 
         // Now apply them
         self.document = Some(document);
         self.file_path = Some(file_path);
+        self.current_url = url;
         self.rendered_lines = rendered_lines;
         self.outline_selected = outline_selected;
+        self.file_modified_time = modified_time;
+        self.is_loading = false;
 
         // Restore scroll position
         let pane = self.current_pane_mut();
@@ -1046,19 +1066,60 @@ impl AppState {
     // === URL Loading ===
 
     /// Load content from a URL
-    pub fn load_url(&mut self, url: &str) -> anyhow::Result<()> {
+    /// Start an async URL fetch (non-blocking)
+    pub fn start_url_fetch(&mut self, url: &str) {
         self.is_loading = true;
         self.status_message = Some(format!("Loading {}...", url));
 
-        // Fetch content
-        let result = self.github_fetcher.fetch(url);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.fetch_receiver = Some(rx);
 
-        self.is_loading = false;
+        let fetcher = self.github_fetcher.clone();
+        let url_owned = url.to_string();
 
-        let content = result.map_err(|e| anyhow::anyhow!("{}", e))?;
+        std::thread::spawn(move || {
+            let result = fetcher
+                .fetch(&url_owned)
+                .map(|content| (content, url_owned.clone()))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+    }
 
+    /// Check if async fetch is complete and process result
+    pub fn check_fetch_complete(&mut self) {
+        if let Some(rx) = &self.fetch_receiver {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.fetch_receiver = None;
+                    self.is_loading = false;
+
+                    match result {
+                        Ok((content, url)) => {
+                            self.finish_load_url(&content, &url);
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Error: {}", e));
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Sender dropped (thread panicked or finished without sending)
+                    self.fetch_receiver = None;
+                    self.is_loading = false;
+                    self.status_message = Some("Error: fetch failed unexpectedly".to_string());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still waiting, nothing to do
+                }
+            }
+        }
+    }
+
+    /// Finish loading URL content (after fetch completes)
+    fn finish_load_url(&mut self, content: &str, url: &str) {
         // Parse and render
-        let document = Document::parse(&content);
+        let mut document = Document::parse(content);
         let highlighter = if self.syntax_highlighting {
             Some(&self.highlighter)
         } else {
@@ -1069,9 +1130,12 @@ impl AppState {
         // Extract display name from URL
         let display_name = url.rsplit('/').next().unwrap_or(url).to_string();
 
+        // Create a placeholder file path for buffer management
+        let placeholder_path = PathBuf::from(format!("[URL] {}", display_name));
+
         // Update state
         self.document = Some(document);
-        self.file_path = None;
+        self.file_path = Some(placeholder_path);
         self.current_url = Some(url.to_string());
         self.file_modified_time = None; // No auto-reload for URLs
 
@@ -1089,6 +1153,22 @@ impl AppState {
         let _ = self.history.save();
 
         self.status_message = Some(format!("Loaded: {}", display_name));
+    }
+
+    /// Load URL content (blocking - kept for potential future use)
+    #[allow(dead_code)]
+    pub fn load_url(&mut self, url: &str) -> anyhow::Result<()> {
+        self.is_loading = true;
+        self.status_message = Some(format!("Loading {}...", url));
+
+        // Fetch content (blocking)
+        let result = self.github_fetcher.fetch(url);
+
+        self.is_loading = false;
+
+        let content = result.map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        self.finish_load_url(&content, url);
 
         Ok(())
     }
@@ -1126,9 +1206,8 @@ impl AppState {
             return;
         }
 
-        if let Err(e) = self.load_url(&url) {
-            self.status_message = Some(format!("Error: {}", e));
-        }
+        // Use non-blocking fetch
+        self.start_url_fetch(&url);
     }
 
     /// Cancel URL input
@@ -1176,9 +1255,8 @@ impl AppState {
             self.show_history = false;
 
             if entry.is_url {
-                if let Err(e) = self.load_url(&entry.location) {
-                    self.status_message = Some(format!("Error: {}", e));
-                }
+                // Non-blocking URL fetch
+                self.start_url_fetch(&entry.location);
             } else {
                 let path = PathBuf::from(&entry.location);
                 if let Err(e) = self.load_file(&path) {
@@ -1227,9 +1305,8 @@ impl AppState {
             self.show_bookmarks = false;
 
             if bookmark.is_url {
-                if let Err(e) = self.load_url(&bookmark.location) {
-                    self.status_message = Some(format!("Error: {}", e));
-                }
+                // Non-blocking URL fetch
+                self.start_url_fetch(&bookmark.location);
             } else {
                 let path = PathBuf::from(&bookmark.location);
                 if let Err(e) = self.load_file(&path) {
