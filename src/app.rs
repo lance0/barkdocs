@@ -931,9 +931,11 @@ impl AppState {
 
         // Check if buffer already exists for this file
         // Skip URL buffers when searching by path to avoid false matches
-        if let Some(idx) = self.buffers.iter().position(|b| {
-            b.url.is_none() && b.file_path == *path
-        }) {
+        if let Some(idx) = self
+            .buffers
+            .iter()
+            .position(|b| b.url.is_none() && b.file_path == *path)
+        {
             self.buffers[idx] = buffer;
             self.active_buffer = idx;
         } else {
