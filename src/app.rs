@@ -1,8 +1,11 @@
 use crate::config::Config;
-use crate::markdown::Document;
+use crate::github::GitHubFetcher;
+use crate::markdown::{Document, SyntaxHighlighter};
+use crate::storage::{Bookmarks, History};
 use crate::theme::Theme;
 use ratatui::layout::Rect;
 use std::path::PathBuf;
+use std::time::SystemTime;
 use tui_textarea::TextArea;
 
 /// Input mode for the application
@@ -12,6 +15,8 @@ pub enum InputMode {
     Normal,
     Search,
     SplitCommand,
+    UrlInput,
+    BookmarkName,
 }
 
 /// Split direction for panes
@@ -40,7 +45,7 @@ pub struct SearchMatch {
 }
 
 /// State for a single pane
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PaneState {
     /// Vertical scroll position (line index)
     pub scroll: usize,
@@ -56,20 +61,6 @@ pub struct PaneState {
     pub current_match: usize,
     /// Textarea for search input
     pub search_textarea: TextArea<'static>,
-}
-
-impl Default for PaneState {
-    fn default() -> Self {
-        Self {
-            scroll: 0,
-            horizontal_scroll: 0,
-            search_query: String::new(),
-            search_is_regex: false,
-            search_matches: Vec::new(),
-            current_match: 0,
-            search_textarea: TextArea::default(),
-        }
-    }
 }
 
 impl PaneState {
@@ -92,6 +83,17 @@ impl PaneState {
     }
 }
 
+/// A document buffer (open file with state)
+#[derive(Clone)]
+pub struct DocumentBuffer {
+    pub document: Document,
+    pub file_path: PathBuf,
+    pub rendered_lines: Vec<ratatui::text::Line<'static>>,
+    pub scroll: usize,
+    pub horizontal_scroll: usize,
+    pub outline_selected: usize,
+}
+
 /// Main application state
 pub struct AppState {
     // Document
@@ -100,6 +102,12 @@ pub struct AppState {
 
     // Rendered lines (cached)
     pub rendered_lines: Vec<ratatui::text::Line<'static>>,
+
+    // Multiple document buffers
+    pub buffers: Vec<DocumentBuffer>,
+    pub active_buffer: usize,
+    pub show_buffer_list: bool,
+    pub buffer_list_selected: usize,
 
     // Pane management
     pub panes: Vec<PaneState>,
@@ -119,6 +127,8 @@ pub struct AppState {
     pub line_wrap: bool,
     pub show_line_numbers: bool,
     pub theme: Theme,
+    pub syntax_highlighting: bool,
+    pub highlighter: SyntaxHighlighter,
 
     // Outline state
     pub outline_selected: usize,
@@ -130,6 +140,35 @@ pub struct AppState {
     pub show_file_picker: bool,
     pub file_picker_files: Vec<PathBuf>,
     pub file_picker_selected: usize,
+
+    // Live reload
+    pub auto_reload: bool,
+    pub file_modified_time: Option<SystemTime>,
+
+    // URL support
+    pub github_fetcher: GitHubFetcher,
+    pub current_url: Option<String>,
+    pub is_loading: bool,
+
+    // History & Bookmarks
+    pub history: History,
+    pub bookmarks: Bookmarks,
+
+    // History overlay state
+    pub show_history: bool,
+    pub history_selected: usize,
+
+    // Bookmarks overlay state
+    pub show_bookmarks: bool,
+    pub bookmarks_selected: usize,
+
+    // URL input state
+    pub show_url_input: bool,
+    pub url_textarea: TextArea<'static>,
+
+    // Bookmark name input state
+    pub show_bookmark_name_input: bool,
+    pub bookmark_name_textarea: TextArea<'static>,
 
     // Layout tracking (for mouse)
     pub content_areas: Vec<Rect>,
@@ -143,6 +182,11 @@ impl AppState {
             document: None,
             file_path: None,
             rendered_lines: Vec::new(),
+
+            buffers: Vec::new(),
+            active_buffer: 0,
+            show_buffer_list: false,
+            buffer_list_selected: 0,
 
             panes: vec![PaneState::new()],
             active_pane: 0,
@@ -159,6 +203,8 @@ impl AppState {
             line_wrap: config.line_wrap,
             show_line_numbers: config.show_line_numbers,
             theme: config.get_theme(),
+            syntax_highlighting: true,
+            highlighter: SyntaxHighlighter::default(),
 
             outline_selected: 0,
             settings_selected: 0,
@@ -167,6 +213,28 @@ impl AppState {
             file_picker_files: Vec::new(),
             file_picker_selected: 0,
 
+            auto_reload: true,
+            file_modified_time: None,
+
+            github_fetcher: GitHubFetcher::new(),
+            current_url: None,
+            is_loading: false,
+
+            history: History::load(),
+            bookmarks: Bookmarks::load(),
+
+            show_history: false,
+            history_selected: 0,
+
+            show_bookmarks: false,
+            bookmarks_selected: 0,
+
+            show_url_input: false,
+            url_textarea: TextArea::default(),
+
+            show_bookmark_name_input: false,
+            bookmark_name_textarea: TextArea::default(),
+
             content_areas: Vec::new(),
             outline_area: Rect::default(),
         }
@@ -174,11 +242,32 @@ impl AppState {
 
     /// Load a markdown file
     pub fn load_file(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
+        // Save current document to buffer before loading new one
+        self.save_to_buffer();
+
+        // Check if this file is already in a buffer
+        let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(idx) = self.buffers.iter().position(|b| {
+            b.file_path
+                .canonicalize()
+                .unwrap_or_else(|_| b.file_path.clone())
+                == abs_path
+        }) {
+            // File already open, switch to that buffer
+            self.load_from_buffer(idx);
+            return Ok(());
+        }
+
         let content = std::fs::read_to_string(path)?;
         let document = Document::parse(&content);
 
-        // Pre-render lines
-        self.rendered_lines = document.render(&self.theme);
+        // Pre-render lines with optional syntax highlighting
+        let highlighter = if self.syntax_highlighting {
+            Some(&self.highlighter)
+        } else {
+            None
+        };
+        self.rendered_lines = document.render_with_highlighting(&self.theme, highlighter);
 
         self.document = Some(document);
         self.file_path = Some(path.to_path_buf());
@@ -193,14 +282,99 @@ impl AppState {
         self.outline_selected = 0;
         self.status_message = None;
 
+        // Store file modification time for auto-reload
+        self.file_modified_time = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+
+        // Add to buffer list
+        self.save_to_buffer();
+
+        // Clear any URL state since we're loading a local file
+        self.current_url = None;
+
+        // Add to history
+        let display_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+        self.history
+            .add(&path.to_string_lossy(), false, &display_name);
+
         Ok(())
+    }
+
+    /// Check if the current file has changed and reload if needed
+    pub fn check_file_changed(&mut self) -> bool {
+        if !self.auto_reload {
+            return false;
+        }
+
+        let Some(path) = &self.file_path else {
+            return false;
+        };
+
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return false;
+        };
+
+        let Ok(current_modified) = metadata.modified() else {
+            return false;
+        };
+
+        // Check if modification time has changed
+        if let Some(stored_time) = self.file_modified_time {
+            if current_modified > stored_time {
+                // File has been modified, reload it
+                let path_clone = path.clone();
+
+                // Read and re-parse the file
+                if let Ok(content) = std::fs::read_to_string(&path_clone) {
+                    let document = Document::parse(&content);
+
+                    // Re-render with current settings
+                    let highlighter = if self.syntax_highlighting {
+                        Some(&self.highlighter)
+                    } else {
+                        None
+                    };
+                    self.rendered_lines =
+                        document.render_with_highlighting(&self.theme, highlighter);
+                    self.document = Some(document);
+                    self.file_modified_time = Some(current_modified);
+                    self.status_message = Some("File reloaded".to_string());
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Toggle auto-reload
+    pub fn toggle_auto_reload(&mut self) {
+        self.auto_reload = !self.auto_reload;
+        self.status_message = Some(if self.auto_reload {
+            "Auto-reload enabled".to_string()
+        } else {
+            "Auto-reload disabled".to_string()
+        });
     }
 
     /// Re-render document (e.g., after theme change)
     pub fn rerender(&mut self) {
         if let Some(doc) = &self.document {
-            self.rendered_lines = doc.render(&self.theme);
+            let highlighter = if self.syntax_highlighting {
+                Some(&self.highlighter)
+            } else {
+                None
+            };
+            self.rendered_lines = doc.render_with_highlighting(&self.theme, highlighter);
         }
+    }
+
+    /// Toggle syntax highlighting
+    pub fn toggle_syntax_highlighting(&mut self) {
+        self.syntax_highlighting = !self.syntax_highlighting;
+        self.rerender();
     }
 
     /// Get current pane
@@ -612,7 +786,11 @@ impl AppState {
 
     /// Open the selected file from the picker
     pub fn open_selected_file(&mut self) {
-        if let Some(path) = self.file_picker_files.get(self.file_picker_selected).cloned() {
+        if let Some(path) = self
+            .file_picker_files
+            .get(self.file_picker_selected)
+            .cloned()
+        {
             self.show_file_picker = false;
             if let Err(e) = self.load_file(&path) {
                 self.status_message = Some(format!("Error: {}", e));
@@ -667,26 +845,42 @@ impl AppState {
                 self.status_message = Some(format!("File not found: {}", path.display()));
             }
         } else if url.starts_with("http://") || url.starts_with("https://") {
-            // External URL - copy to clipboard
-            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                if clipboard.set_text(url).is_ok() {
-                    self.status_message = Some(format!("URL copied: {}", url));
+            // Check if this is a markdown URL we can fetch
+            let can_fetch = url.ends_with(".md")
+                || url.ends_with(".MD")
+                || url.ends_with(".markdown")
+                || url.contains("github.com")
+                || url.contains("raw.githubusercontent.com");
+
+            if can_fetch {
+                // Load the URL directly
+                if let Err(e) = self.load_url(url) {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            } else {
+                // External URL - copy to clipboard
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    if clipboard.set_text(url).is_ok() {
+                        self.status_message = Some(format!("URL copied: {}", url));
+                    } else {
+                        self.status_message = Some(format!("Link: {}", url));
+                    }
                 } else {
                     self.status_message = Some(format!("Link: {}", url));
                 }
-            } else {
-                self.status_message = Some(format!("Link: {}", url));
             }
-        } else if url.starts_with('#') {
+        } else if let Some(anchor) = url.strip_prefix('#') {
             // Anchor link - try to find heading
-            let anchor = &url[1..];
             let heading_info = if let Some(doc) = &self.document {
                 // Find heading that matches anchor (simplified slug matching)
                 let target = anchor.to_lowercase().replace('-', " ");
-                doc.headings.iter().find(|h| {
-                    h.text.to_lowercase() == target
-                        || h.text.to_lowercase().replace(' ', "-") == anchor.to_lowercase()
-                }).map(|h| (h.line_number, h.text.clone()))
+                doc.headings
+                    .iter()
+                    .find(|h| {
+                        h.text.to_lowercase() == target
+                            || h.text.to_lowercase().replace(' ', "-") == anchor.to_lowercase()
+                    })
+                    .map(|h| (h.line_number, h.text.clone()))
             } else {
                 None
             };
@@ -700,5 +894,435 @@ impl AppState {
         } else {
             self.status_message = Some(format!("Unknown link type: {}", url));
         }
+    }
+
+    // === Buffer Management ===
+
+    /// Save current document state to its buffer
+    fn save_to_buffer(&mut self) {
+        if self.document.is_none() || self.file_path.is_none() {
+            return;
+        }
+
+        let doc = self.document.as_ref().unwrap();
+        let path = self.file_path.as_ref().unwrap();
+        let pane = self.current_pane();
+
+        let buffer = DocumentBuffer {
+            document: doc.clone(),
+            file_path: path.clone(),
+            rendered_lines: self.rendered_lines.clone(),
+            scroll: pane.scroll,
+            horizontal_scroll: pane.horizontal_scroll,
+            outline_selected: self.outline_selected,
+        };
+
+        // Check if buffer already exists for this file
+        if let Some(idx) = self.buffers.iter().position(|b| b.file_path == *path) {
+            self.buffers[idx] = buffer;
+            self.active_buffer = idx;
+        } else {
+            self.buffers.push(buffer);
+            self.active_buffer = self.buffers.len() - 1;
+        }
+    }
+
+    /// Load a buffer into the current view
+    fn load_from_buffer(&mut self, index: usize) {
+        if index >= self.buffers.len() {
+            return;
+        }
+
+        // First save current document state
+        self.save_to_buffer();
+
+        // Clone all values we need from the buffer first
+        let buffer = &self.buffers[index];
+        let document = buffer.document.clone();
+        let file_path = buffer.file_path.clone();
+        let rendered_lines = buffer.rendered_lines.clone();
+        let outline_selected = buffer.outline_selected;
+        let scroll = buffer.scroll;
+        let horizontal_scroll = buffer.horizontal_scroll;
+
+        // Now apply them
+        self.document = Some(document);
+        self.file_path = Some(file_path);
+        self.rendered_lines = rendered_lines;
+        self.outline_selected = outline_selected;
+
+        // Restore scroll position
+        let pane = self.current_pane_mut();
+        pane.scroll = scroll;
+        pane.horizontal_scroll = horizontal_scroll;
+
+        self.active_buffer = index;
+    }
+
+    /// Open buffer list overlay
+    pub fn open_buffer_list(&mut self) {
+        if !self.buffers.is_empty() {
+            self.show_buffer_list = true;
+            self.buffer_list_selected = self.active_buffer;
+        } else {
+            self.status_message = Some("No buffers open".to_string());
+        }
+    }
+
+    /// Close buffer list overlay
+    pub fn close_buffer_list(&mut self) {
+        self.show_buffer_list = false;
+    }
+
+    /// Move buffer list selection up
+    pub fn buffer_list_up(&mut self) {
+        if self.buffer_list_selected > 0 {
+            self.buffer_list_selected -= 1;
+        }
+    }
+
+    /// Move buffer list selection down
+    pub fn buffer_list_down(&mut self) {
+        if !self.buffers.is_empty() && self.buffer_list_selected < self.buffers.len() - 1 {
+            self.buffer_list_selected += 1;
+        }
+    }
+
+    /// Switch to selected buffer
+    pub fn select_buffer(&mut self) {
+        let idx = self.buffer_list_selected;
+        self.load_from_buffer(idx);
+        self.show_buffer_list = false;
+        self.status_message = Some(format!("Switched to buffer {}", idx + 1));
+    }
+
+    /// Go to next buffer
+    pub fn next_buffer(&mut self) {
+        if self.buffers.is_empty() {
+            return;
+        }
+        self.save_to_buffer();
+        let next = (self.active_buffer + 1) % self.buffers.len();
+        self.load_from_buffer(next);
+        self.status_message = Some(format!("Buffer {}/{}", next + 1, self.buffers.len()));
+    }
+
+    /// Go to previous buffer
+    pub fn prev_buffer(&mut self) {
+        if self.buffers.is_empty() {
+            return;
+        }
+        self.save_to_buffer();
+        let prev = if self.active_buffer == 0 {
+            self.buffers.len() - 1
+        } else {
+            self.active_buffer - 1
+        };
+        self.load_from_buffer(prev);
+        self.status_message = Some(format!("Buffer {}/{}", prev + 1, self.buffers.len()));
+    }
+
+    /// Close current buffer
+    pub fn close_buffer(&mut self) {
+        if self.buffers.len() <= 1 {
+            self.status_message = Some("Cannot close last buffer".to_string());
+            return;
+        }
+
+        self.buffers.remove(self.active_buffer);
+        if self.active_buffer >= self.buffers.len() {
+            self.active_buffer = self.buffers.len() - 1;
+        }
+        self.load_from_buffer(self.active_buffer);
+        self.status_message = Some(format!("{} buffers remaining", self.buffers.len()));
+    }
+
+    /// Get buffer count
+    #[allow(dead_code)]
+    pub fn buffer_count(&self) -> usize {
+        self.buffers.len()
+    }
+
+    // === URL Loading ===
+
+    /// Load content from a URL
+    pub fn load_url(&mut self, url: &str) -> anyhow::Result<()> {
+        self.is_loading = true;
+        self.status_message = Some(format!("Loading {}...", url));
+
+        // Fetch content
+        let result = self.github_fetcher.fetch(url);
+
+        self.is_loading = false;
+
+        let content = result.map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // Parse and render
+        let document = Document::parse(&content);
+        let highlighter = if self.syntax_highlighting {
+            Some(&self.highlighter)
+        } else {
+            None
+        };
+        self.rendered_lines = document.render_with_highlighting(&self.theme, highlighter);
+
+        // Extract display name from URL
+        let display_name = url.rsplit('/').next().unwrap_or(url).to_string();
+
+        // Update state
+        self.document = Some(document);
+        self.file_path = None;
+        self.current_url = Some(url.to_string());
+        self.file_modified_time = None; // No auto-reload for URLs
+
+        // Reset pane state
+        for pane in &mut self.panes {
+            pane.scroll = 0;
+            pane.horizontal_scroll = 0;
+            pane.search_matches.clear();
+        }
+
+        self.outline_selected = 0;
+
+        // Add to history
+        self.history.add(url, true, &display_name);
+        let _ = self.history.save();
+
+        self.status_message = Some(format!("Loaded: {}", display_name));
+
+        Ok(())
+    }
+
+    /// Get the current location (file path or URL)
+    pub fn current_location(&self) -> Option<String> {
+        self.current_url.clone().or_else(|| {
+            self.file_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+        })
+    }
+
+    /// Check if currently viewing a URL
+    pub fn is_viewing_url(&self) -> bool {
+        self.current_url.is_some()
+    }
+
+    // === URL Input Mode ===
+
+    /// Start URL input mode
+    pub fn start_url_input(&mut self) {
+        self.mode = InputMode::UrlInput;
+        self.show_url_input = true;
+        self.url_textarea = TextArea::default();
+    }
+
+    /// Submit URL and load it
+    pub fn submit_url(&mut self) {
+        let url = self.url_textarea.lines().join("");
+        self.mode = InputMode::Normal;
+        self.show_url_input = false;
+
+        if url.is_empty() {
+            return;
+        }
+
+        if let Err(e) = self.load_url(&url) {
+            self.status_message = Some(format!("Error: {}", e));
+        }
+    }
+
+    /// Cancel URL input
+    pub fn cancel_url_input(&mut self) {
+        self.mode = InputMode::Normal;
+        self.show_url_input = false;
+    }
+
+    // === History ===
+
+    /// Open history overlay
+    pub fn open_history(&mut self) {
+        if self.history.entries().is_empty() {
+            self.status_message = Some("No history".to_string());
+            return;
+        }
+        self.show_history = true;
+        self.history_selected = 0;
+    }
+
+    /// Close history overlay
+    pub fn close_history(&mut self) {
+        self.show_history = false;
+    }
+
+    /// Move history selection up
+    pub fn history_up(&mut self) {
+        if self.history_selected > 0 {
+            self.history_selected -= 1;
+        }
+    }
+
+    /// Move history selection down
+    pub fn history_down(&mut self) {
+        let max = self.history.entries().len().saturating_sub(1);
+        if self.history_selected < max {
+            self.history_selected += 1;
+        }
+    }
+
+    /// Open selected history item
+    pub fn select_history(&mut self) {
+        let entries = self.history.entries();
+        if let Some(entry) = entries.get(self.history_selected).cloned() {
+            self.show_history = false;
+
+            if entry.is_url {
+                if let Err(e) = self.load_url(&entry.location) {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            } else {
+                let path = PathBuf::from(&entry.location);
+                if let Err(e) = self.load_file(&path) {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    // === Bookmarks ===
+
+    /// Open bookmarks overlay
+    pub fn open_bookmarks(&mut self) {
+        if self.bookmarks.entries().is_empty() {
+            self.status_message = Some("No bookmarks".to_string());
+            return;
+        }
+        self.show_bookmarks = true;
+        self.bookmarks_selected = 0;
+    }
+
+    /// Close bookmarks overlay
+    pub fn close_bookmarks(&mut self) {
+        self.show_bookmarks = false;
+    }
+
+    /// Move bookmarks selection up
+    pub fn bookmarks_up(&mut self) {
+        if self.bookmarks_selected > 0 {
+            self.bookmarks_selected -= 1;
+        }
+    }
+
+    /// Move bookmarks selection down
+    pub fn bookmarks_down(&mut self) {
+        let max = self.bookmarks.entries().len().saturating_sub(1);
+        if self.bookmarks_selected < max {
+            self.bookmarks_selected += 1;
+        }
+    }
+
+    /// Open selected bookmark
+    pub fn select_bookmark(&mut self) {
+        let entries = self.bookmarks.entries();
+        if let Some(bookmark) = entries.get(self.bookmarks_selected).cloned() {
+            self.show_bookmarks = false;
+
+            if bookmark.is_url {
+                if let Err(e) = self.load_url(&bookmark.location) {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            } else {
+                let path = PathBuf::from(&bookmark.location);
+                if let Err(e) = self.load_file(&path) {
+                    self.status_message = Some(format!("Error: {}", e));
+                }
+            }
+        }
+    }
+
+    /// Start adding a bookmark (show name input)
+    pub fn start_add_bookmark(&mut self) {
+        let Some(location) = self.current_location() else {
+            self.status_message = Some("Nothing to bookmark".to_string());
+            return;
+        };
+
+        // Check if already bookmarked
+        if self.bookmarks.is_bookmarked(&location) {
+            self.status_message = Some("Already bookmarked".to_string());
+            return;
+        }
+
+        // Pre-fill with filename/URL
+        let default_name = if let Some(url) = &self.current_url {
+            url.rsplit('/').next().unwrap_or(url).to_string()
+        } else if let Some(path) = &self.file_path {
+            path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        self.mode = InputMode::BookmarkName;
+        self.show_bookmark_name_input = true;
+        self.bookmark_name_textarea = TextArea::default();
+        self.bookmark_name_textarea.insert_str(&default_name);
+    }
+
+    /// Confirm adding bookmark with name
+    pub fn confirm_add_bookmark(&mut self) {
+        let name = self.bookmark_name_textarea.lines().join("");
+        self.mode = InputMode::Normal;
+        self.show_bookmark_name_input = false;
+
+        let Some(location) = self.current_location() else {
+            return;
+        };
+
+        let is_url = self.current_url.is_some();
+        let name = if name.is_empty() {
+            location.rsplit('/').next().unwrap_or(&location).to_string()
+        } else {
+            name
+        };
+
+        self.bookmarks.add(&location, is_url, &name);
+        if let Err(e) = self.bookmarks.save() {
+            self.status_message = Some(format!("Failed to save bookmark: {}", e));
+        } else {
+            self.status_message = Some(format!("Bookmarked: {}", name));
+        }
+    }
+
+    /// Cancel adding bookmark
+    pub fn cancel_add_bookmark(&mut self) {
+        self.mode = InputMode::Normal;
+        self.show_bookmark_name_input = false;
+    }
+
+    /// Delete selected bookmark
+    pub fn delete_selected_bookmark(&mut self) {
+        if self.bookmarks_selected < self.bookmarks.entries().len() {
+            self.bookmarks.remove(self.bookmarks_selected);
+            let _ = self.bookmarks.save();
+            self.status_message = Some("Bookmark deleted".to_string());
+
+            // Adjust selection if needed
+            if self.bookmarks_selected > 0
+                && self.bookmarks_selected >= self.bookmarks.entries().len()
+            {
+                self.bookmarks_selected = self.bookmarks.entries().len().saturating_sub(1);
+            }
+
+            // Close if no more bookmarks
+            if self.bookmarks.entries().is_empty() {
+                self.show_bookmarks = false;
+            }
+        }
+    }
+
+    /// Save history (call on exit)
+    pub fn save_history(&self) {
+        let _ = self.history.save();
     }
 }

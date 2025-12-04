@@ -2,6 +2,87 @@ use crate::theme::Theme;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
+use syntect::parsing::SyntaxSet;
+
+/// Syntax highlighter for code blocks
+pub struct SyntaxHighlighter {
+    syntax_set: SyntaxSet,
+    theme_set: ThemeSet,
+    theme_name: String,
+}
+
+impl Default for SyntaxHighlighter {
+    fn default() -> Self {
+        Self::new("base16-ocean.dark")
+    }
+}
+
+impl SyntaxHighlighter {
+    pub fn new(theme_name: &str) -> Self {
+        Self {
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
+            theme_name: theme_name.to_string(),
+        }
+    }
+
+    /// Set the highlighting theme
+    #[allow(dead_code)]
+    pub fn set_theme(&mut self, theme_name: &str) {
+        self.theme_name = theme_name.to_string();
+    }
+
+    /// Get available theme names
+    #[allow(dead_code)]
+    pub fn available_themes(&self) -> Vec<&str> {
+        self.theme_set.themes.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Highlight a code block, returns lines of styled spans
+    pub fn highlight(
+        &self,
+        code: &str,
+        language: Option<&str>,
+    ) -> Vec<Vec<(SyntectStyle, String)>> {
+        let syntax = language
+            .and_then(|lang| self.syntax_set.find_syntax_by_token(lang))
+            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+
+        let theme = self
+            .theme_set
+            .themes
+            .get(&self.theme_name)
+            .unwrap_or_else(|| self.theme_set.themes.values().next().unwrap());
+
+        let mut highlighter = HighlightLines::new(syntax, theme);
+        let mut result = Vec::new();
+
+        for line in code.lines() {
+            match highlighter.highlight_line(line, &self.syntax_set) {
+                Ok(ranges) => {
+                    let styled: Vec<(SyntectStyle, String)> = ranges
+                        .into_iter()
+                        .map(|(style, text)| (style, text.to_string()))
+                        .collect();
+                    result.push(styled);
+                }
+                Err(_) => {
+                    // Fallback to plain text on error
+                    result.push(vec![(SyntectStyle::default(), line.to_string())]);
+                }
+            }
+        }
+
+        result
+    }
+}
+
+/// Convert syntect color to ratatui Color
+fn syntect_to_ratatui_color(color: syntect::highlighting::Color) -> Color {
+    Color::Rgb(color.r, color.g, color.b)
+}
 
 /// A heading extracted for the outline
 #[derive(Clone, Debug)]
@@ -15,6 +96,7 @@ pub struct Heading {
 #[derive(Clone, Debug)]
 pub struct Link {
     pub url: String,
+    #[allow(dead_code)]
     pub text: String,
     pub line_number: usize,
 }
@@ -44,6 +126,7 @@ pub struct ListItem {
 
 /// A block of content
 #[derive(Clone, Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum Block {
     Heading {
         level: u8,
@@ -122,11 +205,7 @@ impl Document {
                         code_language = match kind {
                             pulldown_cmark::CodeBlockKind::Fenced(lang) => {
                                 let lang = lang.to_string();
-                                if lang.is_empty() {
-                                    None
-                                } else {
-                                    Some(lang)
-                                }
+                                if lang.is_empty() { None } else { Some(lang) }
                             }
                             pulldown_cmark::CodeBlockKind::Indented => None,
                         };
@@ -281,11 +360,25 @@ impl Document {
             }
         }
 
-        Document { blocks, headings, links }
+        Document {
+            blocks,
+            headings,
+            links,
+        }
     }
 
-    /// Render document to displayable lines
+    /// Render document to displayable lines (without syntax highlighting)
+    #[allow(dead_code)]
     pub fn render(&self, theme: &Theme) -> Vec<Line<'static>> {
+        self.render_with_highlighting(theme, None)
+    }
+
+    /// Render document with optional syntax highlighting for code blocks
+    pub fn render_with_highlighting(
+        &self,
+        theme: &Theme,
+        highlighter: Option<&SyntaxHighlighter>,
+    ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
         for block in &self.blocks {
@@ -329,21 +422,53 @@ impl Document {
                         Style::default().fg(theme.text_muted),
                     ));
 
-                    // Code content
-                    for code_line in code.lines() {
-                        lines.push(Line::styled(
-                            format!("  {}", code_line),
-                            Style::default()
-                                .fg(theme.code_inline)
-                                .bg(theme.code_block_bg),
-                        ));
+                    // Code content with optional syntax highlighting
+                    if let Some(hl) = highlighter {
+                        let highlighted = hl.highlight(code, language.as_deref());
+                        for highlighted_line in highlighted {
+                            let mut line_spans =
+                                vec![Span::styled("  ", Style::default().bg(theme.code_block_bg))];
+                            for (style, text) in highlighted_line {
+                                let fg = syntect_to_ratatui_color(style.foreground);
+                                let mut ratatui_style =
+                                    Style::default().fg(fg).bg(theme.code_block_bg);
+                                if style
+                                    .font_style
+                                    .contains(syntect::highlighting::FontStyle::BOLD)
+                                {
+                                    ratatui_style = ratatui_style.add_modifier(Modifier::BOLD);
+                                }
+                                if style
+                                    .font_style
+                                    .contains(syntect::highlighting::FontStyle::ITALIC)
+                                {
+                                    ratatui_style = ratatui_style.add_modifier(Modifier::ITALIC);
+                                }
+                                if style
+                                    .font_style
+                                    .contains(syntect::highlighting::FontStyle::UNDERLINE)
+                                {
+                                    ratatui_style =
+                                        ratatui_style.add_modifier(Modifier::UNDERLINED);
+                                }
+                                line_spans.push(Span::styled(text, ratatui_style));
+                            }
+                            lines.push(Line::from(line_spans));
+                        }
+                    } else {
+                        // Fallback: no highlighting
+                        for code_line in code.lines() {
+                            lines.push(Line::styled(
+                                format!("  {}", code_line),
+                                Style::default()
+                                    .fg(theme.code_inline)
+                                    .bg(theme.code_block_bg),
+                            ));
+                        }
                     }
 
                     // Code fence end
-                    lines.push(Line::styled(
-                        "```",
-                        Style::default().fg(theme.text_muted),
-                    ));
+                    lines.push(Line::styled("```", Style::default().fg(theme.text_muted)));
                     lines.push(Line::from("")); // blank line after code block
                 }
 
@@ -360,10 +485,8 @@ impl Document {
                             "• ".to_string()
                         };
 
-                        let mut line_spans = vec![Span::styled(
-                            marker,
-                            Style::default().fg(theme.list_marker),
-                        )];
+                        let mut line_spans =
+                            vec![Span::styled(marker, Style::default().fg(theme.list_marker))];
 
                         for span in &item.spans {
                             line_spans.push(render_span(span, theme, None));
@@ -375,10 +498,8 @@ impl Document {
                 }
 
                 Block::BlockQuote { spans } => {
-                    let mut line_spans = vec![Span::styled(
-                        "│ ",
-                        Style::default().fg(theme.blockquote),
-                    )];
+                    let mut line_spans =
+                        vec![Span::styled("│ ", Style::default().fg(theme.blockquote))];
 
                     for span in spans {
                         line_spans.push(Span::styled(
@@ -407,6 +528,7 @@ impl Document {
     }
 
     /// Get total line count (estimated)
+    #[allow(dead_code)]
     pub fn line_count(&self) -> usize {
         self.render(&Theme::default()).len()
     }

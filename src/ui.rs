@@ -1,5 +1,6 @@
 use crate::app::{AppState, FocusedPanel, InputMode, SplitDirection};
 use crate::theme::Theme;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -7,7 +8,6 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 
 const OUTLINE_WIDTH: u16 = 24;
 
@@ -68,6 +68,26 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
 
     if state.show_file_picker {
         draw_file_picker(frame, state);
+    }
+
+    if state.show_buffer_list {
+        draw_buffer_list(frame, state);
+    }
+
+    if state.show_history {
+        draw_history_overlay(frame, state);
+    }
+
+    if state.show_bookmarks {
+        draw_bookmarks_overlay(frame, state);
+    }
+
+    if state.show_url_input {
+        draw_url_input(frame, state);
+    }
+
+    if state.show_bookmark_name_input {
+        draw_bookmark_name_input(frame, state);
     }
 }
 
@@ -144,8 +164,7 @@ fn draw_outline(frame: &mut Frame, state: &AppState, area: Rect) {
         let list = List::new(items);
         frame.render_widget(list, inner);
     } else {
-        let empty = Paragraph::new("(no document)")
-            .style(Style::default().fg(theme.empty_state));
+        let empty = Paragraph::new("(no document)").style(Style::default().fg(theme.empty_state));
         frame.render_widget(empty, inner);
     }
 }
@@ -226,18 +245,16 @@ fn draw_pane(frame: &mut Frame, state: &AppState, area: Rect, pane_idx: usize) {
     };
 
     // Split area for line numbers and content
-    let (line_num_area, content_area) = if state.show_line_numbers && line_num_width < inner_area.width {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(line_num_width),
-                Constraint::Min(1),
-            ])
-            .split(inner_area);
-        (Some(chunks[0]), chunks[1])
-    } else {
-        (None, inner_area)
-    };
+    let (line_num_area, content_area) =
+        if state.show_line_numbers && line_num_width < inner_area.width {
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(line_num_width), Constraint::Min(1)])
+                .split(inner_area);
+            (Some(chunks[0]), chunks[1])
+        } else {
+            (None, inner_area)
+        };
 
     // Get lines to display
     let visible_lines: Vec<Line> = state
@@ -262,7 +279,11 @@ fn draw_pane(frame: &mut Frame, state: &AppState, area: Rect, pane_idx: usize) {
                 let line_num = scroll + i + 1;
                 if line_num <= total_lines {
                     Line::from(Span::styled(
-                        format!("{:>width$} ", line_num, width = (line_num_width - 2) as usize),
+                        format!(
+                            "{:>width$} ",
+                            line_num,
+                            width = (line_num_width - 2) as usize
+                        ),
                         Style::default().fg(theme.text_muted),
                     ))
                 } else {
@@ -400,6 +421,8 @@ fn draw_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
         InputMode::Normal => " NORMAL ",
         InputMode::Search => " SEARCH ",
         InputMode::SplitCommand => " SPLIT ",
+        InputMode::UrlInput => " URL ",
+        InputMode::BookmarkName => " BOOKMARK ",
     };
 
     let mode_span = Span::styled(
@@ -417,6 +440,12 @@ fn draw_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Flags
     let mut flags = String::new();
+    if state.is_loading {
+        flags.push_str("[LOADING]");
+    }
+    if state.is_viewing_url() {
+        flags.push_str("[URL]");
+    }
     if state.line_wrap {
         flags.push_str("[W]");
     }
@@ -427,14 +456,30 @@ fn draw_status_bar(frame: &mut Frame, state: &AppState, area: Rect) {
         flags.push_str("[#]");
     }
     if state.split_direction != SplitDirection::None {
-        flags.push_str(&format!("[{}/{}]", state.active_pane + 1, state.panes.len()));
+        flags.push_str(&format!(
+            "[{}/{}]",
+            state.active_pane + 1,
+            state.panes.len()
+        ));
+    }
+    if state.buffers.len() > 1 {
+        flags.push_str(&format!(
+            "[B{}/{}]",
+            state.active_buffer + 1,
+            state.buffers.len()
+        ));
+    }
+    if state.auto_reload {
+        flags.push_str("[R]");
     }
 
     // Help hint
     let hint = match state.mode {
-        InputMode::Normal => " ?:help b:outline o:open /:search ",
+        InputMode::Normal => " ?:help O:url H:history m:bookmarks ",
         InputMode::Search => " Enter:search Esc:cancel Ctrl+r:regex ",
         InputMode::SplitCommand => " v:vsplit s:hsplit q:close w:cycle ",
+        InputMode::UrlInput => " Enter:load Esc:cancel ",
+        InputMode::BookmarkName => " Enter:save Esc:cancel ",
     };
 
     // Calculate padding
@@ -475,8 +520,8 @@ fn draw_search_bar(frame: &mut Frame, state: &mut AppState, area: Rect) {
         frame.render_widget(&pane.search_textarea, chunks[1]);
     } else if let Some(msg) = &state.status_message {
         // Status message
-        let message = Paragraph::new(msg.as_str())
-            .style(Style::default().fg(theme.warning_message));
+        let message =
+            Paragraph::new(msg.as_str()).style(Style::default().fg(theme.warning_message));
         frame.render_widget(message, area);
     } else {
         // Empty
@@ -490,7 +535,7 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
 
     // Calculate centered area
     let width = 60.min(area.width.saturating_sub(4));
-    let height = 20.min(area.height.saturating_sub(4));
+    let height = 30.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
 
@@ -511,34 +556,46 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
 
     // Help content
     let help_text = vec![
-        Line::from(vec![
-            Span::styled("Navigation", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Navigation",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  j/k, ↑/↓       Scroll up/down"),
         Line::from("  h/l, ←/→       Scroll left/right"),
         Line::from("  g/G            Top/bottom"),
         Line::from("  Ctrl+u/d       Half page up/down"),
         Line::from("  Enter/f        Follow link"),
+        Line::from("  y              Yank (copy) line"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Search", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Search",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  /              Start search"),
         Line::from("  n/N            Next/prev match"),
         Line::from("  Ctrl+r         Toggle regex"),
-        Line::from("  Esc            Clear search"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("View", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "View",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
         Line::from("  b              Toggle outline"),
-        Line::from("  w              Toggle line wrap"),
-        Line::from("  o              Open file picker"),
-        Line::from("  Ctrl+W,v/s     Split vertical/horizontal"),
-        Line::from("  Ctrl+W,q       Close pane"),
-        Line::from("  Tab            Switch focus"),
+        Line::from("  w/#            Line wrap / numbers"),
+        Line::from("  Ctrl+s/R       Syntax hl / auto-reload"),
+        Line::from("  Tab            Switch panel focus"),
+        Line::from("  Ctrl+W,v/s/q   Split v/h / close pane"),
         Line::from(""),
-        Line::from("  q              Quit    ?  Close help"),
+        Line::from(vec![Span::styled(
+            "Files & URLs",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  o/O            Open file / URL"),
+        Line::from("  H              View history"),
+        Line::from("  m/M            Bookmarks / add bookmark"),
+        Line::from("  B              Buffer list"),
+        Line::from("  Ctrl+n/p/x     Next/prev/close buffer"),
+        Line::from(""),
+        Line::from("  S  Settings    q  Quit    ?  Close"),
     ];
 
     let paragraph = Paragraph::new(help_text).style(Style::default().fg(theme.text));
@@ -553,7 +610,7 @@ fn draw_settings_overlay(frame: &mut Frame, state: &AppState) {
 
     // Calculate centered area
     let width = 40.min(area.width.saturating_sub(4));
-    let height = 10.min(area.height.saturating_sub(4));
+    let height = 14.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
 
@@ -575,9 +632,31 @@ fn draw_settings_overlay(frame: &mut Frame, state: &AppState) {
     // Settings list
     let settings = [
         ("Theme", theme.name.to_string()),
-        ("Line Wrap", if state.line_wrap { "ON" } else { "OFF" }.to_string()),
-        ("Outline Panel", if state.show_outline { "ON" } else { "OFF" }.to_string()),
-        ("Line Numbers", if state.show_line_numbers { "ON" } else { "OFF" }.to_string()),
+        (
+            "Line Wrap",
+            if state.line_wrap { "ON" } else { "OFF" }.to_string(),
+        ),
+        (
+            "Outline Panel",
+            if state.show_outline { "ON" } else { "OFF" }.to_string(),
+        ),
+        (
+            "Line Numbers",
+            if state.show_line_numbers { "ON" } else { "OFF" }.to_string(),
+        ),
+        (
+            "Syntax Highlight",
+            if state.syntax_highlighting {
+                "ON"
+            } else {
+                "OFF"
+            }
+            .to_string(),
+        ),
+        (
+            "Auto Reload",
+            if state.auto_reload { "ON" } else { "OFF" }.to_string(),
+        ),
         ("Save Settings", "[Enter]".to_string()),
     ];
 
@@ -634,8 +713,8 @@ fn draw_file_picker(frame: &mut Frame, state: &AppState) {
     frame.render_widget(block, popup_area);
 
     if state.file_picker_files.is_empty() {
-        let empty = Paragraph::new("No markdown files found")
-            .style(Style::default().fg(theme.empty_state));
+        let empty =
+            Paragraph::new("No markdown files found").style(Style::default().fg(theme.empty_state));
         frame.render_widget(empty, inner);
         return;
     }
@@ -681,4 +760,287 @@ fn draw_file_picker(frame: &mut Frame, state: &AppState) {
 
     let list = List::new(items);
     frame.render_widget(list, inner);
+}
+
+/// Draw the buffer list overlay
+fn draw_buffer_list(frame: &mut Frame, state: &AppState) {
+    let theme = &state.theme;
+    let area = frame.area();
+
+    // Calculate centered area
+    let width = 50.min(area.width.saturating_sub(4));
+    let height = 15.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+
+    let popup_area = Rect::new(x, y, width, height);
+
+    // Clear background
+    frame.render_widget(Clear, popup_area);
+
+    // Draw block
+    let block = Block::default()
+        .title(format!(" Open Buffers ({}) ", state.buffers.len()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.help_border))
+        .style(Style::default().bg(theme.help_bg));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    if state.buffers.is_empty() {
+        let empty = Paragraph::new("No buffers open").style(Style::default().fg(theme.empty_state));
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    // Calculate visible range (scrolling if needed)
+    let visible_height = inner.height as usize;
+    let selected = state.buffer_list_selected;
+    let total = state.buffers.len();
+
+    let start = if selected >= visible_height {
+        selected - visible_height + 1
+    } else {
+        0
+    };
+    let end = (start + visible_height).min(total);
+
+    // Buffer list
+    let items: Vec<ListItem> = state
+        .buffers
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+        .map(|(i, buffer)| {
+            let filename = buffer
+                .file_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| buffer.file_path.to_string_lossy().to_string());
+
+            let marker = if i == selected { "> " } else { "  " };
+            let active_marker = if i == state.active_buffer { " *" } else { "" };
+
+            let style = if i == selected {
+                Style::default()
+                    .fg(theme.outline_selected)
+                    .add_modifier(Modifier::BOLD)
+            } else if i == state.active_buffer {
+                Style::default().fg(theme.heading_1)
+            } else {
+                Style::default().fg(theme.text)
+            };
+
+            ListItem::new(format!(
+                "{}[{}] {}{}",
+                marker,
+                i + 1,
+                filename,
+                active_marker
+            ))
+            .style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
+}
+
+/// Draw the history overlay
+fn draw_history_overlay(frame: &mut Frame, state: &AppState) {
+    let theme = &state.theme;
+    let area = frame.area();
+
+    // Calculate centered area
+    let width = 60.min(area.width.saturating_sub(4));
+    let height = 15.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+
+    let popup_area = Rect::new(x, y, width, height);
+
+    // Clear background
+    frame.render_widget(Clear, popup_area);
+
+    // Draw block
+    let entry_count = state.history.entries().len();
+    let block = Block::default()
+        .title(format!(" History ({}) ", entry_count))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.help_border))
+        .style(Style::default().bg(theme.help_bg));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    if state.history.entries().is_empty() {
+        let empty = Paragraph::new("No history yet").style(Style::default().fg(theme.empty_state));
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    // Calculate visible range (scrolling if needed)
+    let visible_height = inner.height as usize;
+    let selected = state.history_selected;
+    let total = state.history.entries().len();
+
+    let start = if selected >= visible_height {
+        selected - visible_height + 1
+    } else {
+        0
+    };
+    let end = (start + visible_height).min(total);
+
+    // History list
+    let items: Vec<ListItem> = state
+        .history
+        .entries()
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+        .map(|(i, entry)| {
+            let marker = if i == selected { "> " } else { "  " };
+            let icon = if entry.is_url { "🌐 " } else { "📄 " };
+
+            let style = if i == selected {
+                Style::default()
+                    .fg(theme.outline_selected)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text)
+            };
+
+            ListItem::new(format!("{}{}{}", marker, icon, entry.display_name)).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
+}
+
+/// Draw the bookmarks overlay
+fn draw_bookmarks_overlay(frame: &mut Frame, state: &AppState) {
+    let theme = &state.theme;
+    let area = frame.area();
+
+    // Calculate centered area
+    let width = 60.min(area.width.saturating_sub(4));
+    let height = 15.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+
+    let popup_area = Rect::new(x, y, width, height);
+
+    // Clear background
+    frame.render_widget(Clear, popup_area);
+
+    // Draw block
+    let entry_count = state.bookmarks.entries().len();
+    let block = Block::default()
+        .title(format!(" Bookmarks ({}) - d:delete ", entry_count))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.help_border))
+        .style(Style::default().bg(theme.help_bg));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    if state.bookmarks.entries().is_empty() {
+        let empty = Paragraph::new("No bookmarks yet (M to add)")
+            .style(Style::default().fg(theme.empty_state));
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    // Calculate visible range (scrolling if needed)
+    let visible_height = inner.height as usize;
+    let selected = state.bookmarks_selected;
+    let total = state.bookmarks.entries().len();
+
+    let start = if selected >= visible_height {
+        selected - visible_height + 1
+    } else {
+        0
+    };
+    let end = (start + visible_height).min(total);
+
+    // Bookmarks list
+    let items: Vec<ListItem> = state
+        .bookmarks
+        .entries()
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+        .map(|(i, bookmark)| {
+            let marker = if i == selected { "> " } else { "  " };
+            let icon = if bookmark.is_url { "🌐 " } else { "📄 " };
+
+            let style = if i == selected {
+                Style::default()
+                    .fg(theme.outline_selected)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text)
+            };
+
+            ListItem::new(format!("{}{}{}", marker, icon, bookmark.name)).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
+}
+
+/// Draw the URL input bar
+fn draw_url_input(frame: &mut Frame, state: &mut AppState) {
+    let theme = &state.theme;
+    let area = frame.area();
+
+    // URL input at the bottom of the screen
+    let input_area = Rect::new(0, area.height.saturating_sub(3), area.width, 3);
+
+    // Clear background
+    frame.render_widget(Clear, input_area);
+
+    // Draw block
+    let block = Block::default()
+        .title(" Enter URL ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.help_border))
+        .style(Style::default().bg(theme.help_bg));
+
+    let inner = block.inner(input_area);
+    frame.render_widget(block, input_area);
+
+    // Render textarea
+    frame.render_widget(&state.url_textarea, inner);
+}
+
+/// Draw the bookmark name input bar
+fn draw_bookmark_name_input(frame: &mut Frame, state: &mut AppState) {
+    let theme = &state.theme;
+    let area = frame.area();
+
+    // Input at the bottom of the screen
+    let input_area = Rect::new(0, area.height.saturating_sub(3), area.width, 3);
+
+    // Clear background
+    frame.render_widget(Clear, input_area);
+
+    // Draw block
+    let block = Block::default()
+        .title(" Bookmark Name ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.help_border))
+        .style(Style::default().bg(theme.help_bg));
+
+    let inner = block.inner(input_area);
+    frame.render_widget(block, input_area);
+
+    // Render textarea
+    frame.render_widget(&state.bookmark_name_textarea, inner);
 }

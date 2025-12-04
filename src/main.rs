@@ -1,7 +1,9 @@
 mod app;
 mod config;
+mod github;
 mod input;
 mod markdown;
+mod storage;
 mod theme;
 mod ui;
 
@@ -11,10 +13,10 @@ use config::Config;
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -43,26 +45,35 @@ fn main() -> Result<()> {
     let config = Config::load();
     let mut state = AppState::new(&config);
 
-    // Determine file to open
-    let file_to_open = if args.len() >= 2 && !args[1].starts_with('-') {
-        Some(PathBuf::from(&args[1]))
+    // Determine what to open (file or URL)
+    if args.len() >= 2 && !args[1].starts_with('-') {
+        let arg = &args[1];
+
+        // Check if it's a URL
+        if arg.starts_with("http://") || arg.starts_with("https://") {
+            if let Err(e) = state.load_url(arg) {
+                state.status_message = Some(format!("Error loading URL: {}", e));
+            }
+        } else {
+            // Local file path
+            let path = PathBuf::from(arg);
+            if let Err(e) = state.load_file(&path) {
+                state.status_message = Some(format!("Error loading file: {}", e));
+            }
+        }
     } else {
         // Try README.md in current directory
         let candidates = ["README.md", "readme.md", "README.MD", "Readme.md"];
-        candidates
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.exists())
-    };
+        let readme = candidates.iter().map(PathBuf::from).find(|p| p.exists());
 
-    // Load file if found, otherwise open file picker
-    if let Some(path) = file_to_open {
-        if let Err(e) = state.load_file(&path) {
-            state.status_message = Some(format!("Error loading file: {}", e));
+        if let Some(path) = readme {
+            if let Err(e) = state.load_file(&path) {
+                state.status_message = Some(format!("Error loading file: {}", e));
+            }
+        } else {
+            // No README found - open file picker
+            state.open_file_picker();
         }
-    } else {
-        // No README found - open file picker
-        state.open_file_picker();
     }
 
     // Terminal setup
@@ -85,6 +96,9 @@ fn main() -> Result<()> {
 
     // Event loop
     let result = run_event_loop(&mut terminal, &mut state);
+
+    // Save history before cleanup
+    state.save_history();
 
     // Cleanup
     disable_raw_mode()?;
@@ -121,8 +135,8 @@ fn run_event_loop(
             }
         }
 
-        // Clear transient status messages after a while
-        // (In a more complete implementation, we'd track time)
+        // Check for file changes (live reload)
+        state.check_file_changed();
 
         if state.should_quit {
             break;
@@ -137,10 +151,10 @@ fn print_help() {
         r#"barkdocs - A keyboard-driven TUI markdown viewer
 
 USAGE:
-    barkdocs [OPTIONS] [FILE]
+    barkdocs [OPTIONS] [FILE|URL]
 
 ARGS:
-    [FILE]    Markdown file to view (defaults to README.md)
+    [FILE|URL]  Markdown file or GitHub URL to view (defaults to README.md)
 
 OPTIONS:
     -h, --help       Print help information
@@ -163,8 +177,23 @@ NAVIGATION:
     S                Settings
     q                Quit
 
+URL & HISTORY:
+    O                Open URL (GitHub, raw markdown)
+    H                View history (recently opened)
+    m                View bookmarks
+    M                Add current document to bookmarks
+
+SUPPORTED URLS:
+    github.com/user/repo              Fetches README.md
+    github.com/user/repo/blob/...     Converts to raw URL
+    raw.githubusercontent.com/...     Direct raw content
+
 CONFIG:
     ~/.config/barkdocs/config.toml
+
+DATA:
+    ~/.local/share/barkdocs/history.json
+    ~/.local/share/barkdocs/bookmarks.json
 
 ENVIRONMENT:
     BARKDOCS_THEME        Override theme

@@ -20,10 +20,37 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent, page_size: usize) {
         return;
     }
 
+    if state.show_buffer_list {
+        handle_buffer_list(state, key);
+        return;
+    }
+
+    // Handle URL/history/bookmarks overlays
+    if state.show_url_input {
+        handle_url_input(state, key);
+        return;
+    }
+
+    if state.show_history {
+        handle_history_overlay(state, key);
+        return;
+    }
+
+    if state.show_bookmarks {
+        handle_bookmarks_overlay(state, key);
+        return;
+    }
+
+    if state.show_bookmark_name_input {
+        handle_bookmark_name_input(state, key);
+        return;
+    }
+
     match state.mode {
         InputMode::Normal => handle_normal_mode(state, key, page_size),
         InputMode::Search => handle_search_mode(state, key),
         InputMode::SplitCommand => handle_split_command(state, key),
+        InputMode::UrlInput | InputMode::BookmarkName => {}
     }
 }
 
@@ -96,23 +123,39 @@ fn handle_normal_mode(state: &mut AppState, key: KeyEvent, page_size: usize) {
             state.follow_link();
         }
 
+        // Buffer management (Ctrl bindings must come before plain keys)
+        KeyCode::Char('n') if ctrl => state.next_buffer(),
+        KeyCode::Char('p') if ctrl => state.prev_buffer(),
+        KeyCode::Char('x') if ctrl => state.close_buffer(),
+        KeyCode::Char('B') => state.open_buffer_list(),
+
         // Search
         KeyCode::Char('/') => state.start_search(),
         KeyCode::Char('n') => state.next_match(),
         KeyCode::Char('N') => state.prev_match(),
 
-        // Display toggles
-        KeyCode::Char('w') if !ctrl => state.toggle_line_wrap(),
-        KeyCode::Char('#') => state.toggle_line_numbers(),
-
-        // Split view (Ctrl+W prefix)
+        // Display toggles (Ctrl+w must come before plain w)
         KeyCode::Char('w') if ctrl => state.mode = InputMode::SplitCommand,
+        KeyCode::Char('w') => state.toggle_line_wrap(),
+        KeyCode::Char('#') => state.toggle_line_numbers(),
+        KeyCode::Char('s') if ctrl => state.toggle_syntax_highlighting(),
+        KeyCode::Char('R') => state.toggle_auto_reload(),
+
+        // History overlay
+        KeyCode::Char('H') => state.open_history(),
 
         // Yank
         KeyCode::Char('y') => state.yank_line(),
 
         // Open file picker
         KeyCode::Char('o') => state.open_file_picker(),
+
+        // Open URL input
+        KeyCode::Char('O') => state.start_url_input(),
+
+        // Bookmarks
+        KeyCode::Char('m') => state.open_bookmarks(),
+        KeyCode::Char('M') => state.start_add_bookmark(),
 
         // Clear search / escape
         KeyCode::Esc => state.clear_search(),
@@ -163,7 +206,7 @@ fn handle_help_overlay(state: &mut AppState, key: KeyEvent) {
 
 /// Handle settings overlay input
 fn handle_settings_overlay(state: &mut AppState, key: KeyEvent) {
-    const NUM_SETTINGS: usize = 5; // 4 toggles + Save
+    const NUM_SETTINGS: usize = 7; // 6 toggles + Save
 
     match key.code {
         KeyCode::Esc | KeyCode::Char('S') => {
@@ -207,6 +250,25 @@ fn handle_file_picker(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+/// Handle buffer list overlay input
+fn handle_buffer_list(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('B') | KeyCode::Char('q') => {
+            state.close_buffer_list();
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.buffer_list_down();
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.buffer_list_up();
+        }
+        KeyCode::Enter => {
+            state.select_buffer();
+        }
+        _ => {}
+    }
+}
+
 /// Toggle a setting by index
 fn toggle_setting(state: &mut AppState, index: usize) {
     match index {
@@ -214,8 +276,75 @@ fn toggle_setting(state: &mut AppState, index: usize) {
         1 => state.toggle_line_wrap(),
         2 => state.toggle_outline(),
         3 => state.toggle_line_numbers(),
-        4 => state.save_config(),
+        4 => state.toggle_syntax_highlighting(),
+        5 => state.toggle_auto_reload(),
+        6 => state.save_config(),
         _ => {}
+    }
+}
+
+/// Handle URL input mode
+fn handle_url_input(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => state.submit_url(),
+        KeyCode::Esc => state.cancel_url_input(),
+        _ => {
+            let input = Input::from(key);
+            state.url_textarea.input(input);
+        }
+    }
+}
+
+/// Handle history overlay input
+fn handle_history_overlay(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('H') | KeyCode::Char('q') => {
+            state.close_history();
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.history_down();
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.history_up();
+        }
+        KeyCode::Enter => {
+            state.select_history();
+        }
+        _ => {}
+    }
+}
+
+/// Handle bookmarks overlay input
+fn handle_bookmarks_overlay(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('m') | KeyCode::Char('q') => {
+            state.close_bookmarks();
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.bookmarks_down();
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.bookmarks_up();
+        }
+        KeyCode::Enter => {
+            state.select_bookmark();
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            state.delete_selected_bookmark();
+        }
+        _ => {}
+    }
+}
+
+/// Handle bookmark name input mode
+fn handle_bookmark_name_input(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => state.confirm_add_bookmark(),
+        KeyCode::Esc => state.cancel_add_bookmark(),
+        _ => {
+            let input = Input::from(key);
+            state.bookmark_name_textarea.input(input);
+        }
     }
 }
 
