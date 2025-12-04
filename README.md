@@ -1,9 +1,5 @@
 # Barkdocs
 
-<p align="center">
-  <img src="kimchi.svg" alt="Kimchi - barkdocs mascot" width="200">
-</p>
-
 A keyboard-driven TUI markdown viewer, companion to [barklog](https://github.com/lance0/barklog).
 
 ![barkdocs screenshot](screenshot.png)
