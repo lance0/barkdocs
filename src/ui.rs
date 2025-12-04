@@ -593,7 +593,7 @@ fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from("  b              Toggle outline"),
-        Line::from("  </>  [/]       Resize outline panel"),
+        Line::from("  < >  [ ]       Resize outline panel"),
         Line::from("  w/#            Line wrap / numbers"),
         Line::from("  Ctrl+s/R       Syntax hl / auto-reload"),
         Line::from("  Tab            Switch panel focus"),

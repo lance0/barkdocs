@@ -70,7 +70,7 @@ barkdocs
 | Key | Action |
 |-----|--------|
 | `b` | Toggle outline panel |
-| `</>` or `[/]` | Resize outline panel |
+| `<` `>` or `[` `]` | Resize outline panel |
 | `w` | Toggle line wrap |
 | `#` | Toggle line numbers |
 | `Ctrl+s` | Toggle syntax highlighting |
