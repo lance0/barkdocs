@@ -2,7 +2,7 @@
 
 All notable changes to barkdocs will be documented in this file.
 
-## [1.1.2] - 2025-12-04
+## [1.1.3] - 2025-12-04
 
 ### Added
 - Screenshot in README
