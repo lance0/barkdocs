@@ -2,7 +2,19 @@
 
 All notable changes to barkdocs will be documented in this file.
 
-## [0.1.0] - 2024-12-04
+## [1.1.1] - 2025-12-04
+
+### Added
+- Kimchi (Italian Greyhound) as official mascot
+- Screenshot in README
+- CI/CD pipeline with GitHub Actions
+- Automated releases and crates.io publishing
+- 40 unit tests for core functionality
+
+### Fixed
+- Version number now correctly set in Cargo.toml
+
+## [1.0.0] - 2025-12-04
 
 ### Added
 
